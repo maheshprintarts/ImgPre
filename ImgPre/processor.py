@@ -1,7 +1,10 @@
 from PIL import Image
 import os
+import logging
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def get_sharpness_score(pil_img):
@@ -92,7 +95,6 @@ def optimize_image_size(img, step=0.98, is_prescaled=False, min_short_side=500):
 
 # Modes that need special handling when converting to RGB
 _MODES_NEEDING_ALPHA_FLATTEN = ('RGBA', 'LA', 'PA')
-_MODES_DIRECT_TO_RGB = ('L', 'P', 'CMYK', 'YCbCr', 'LAB', 'HSV', 'I', 'F')
 
 
 def to_rgb(img):
@@ -187,10 +189,17 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
                     fit_h = max(1, int(img.height * scale))
                     img = img.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
 
-                # Step 5: Save — always RGB
-                img.save(output_path, dpi=(dpi, dpi), quality=100,
-                         subsampling=0, optimize=True, progressive=True)
+                # Step 5: Save — format-aware, always RGB
+                ext = os.path.splitext(output_path)[1].lower()
+                if ext in ('.jpg', '.jpeg'):
+                    img.save(output_path, dpi=(dpi, dpi), quality=100,
+                             subsampling=0, optimize=True, progressive=True)
+                elif ext == '.png':
+                    img.save(output_path, dpi=(dpi, dpi), optimize=True)
+                else:
+                    img.save(output_path, dpi=(dpi, dpi))
 
+                logger.info("Saved: %s (%dx%d @ %d DPI)", output_path, img.width, img.height, dpi)
                 return img.size
 
     except Exception as e:
@@ -206,7 +215,7 @@ def process_batch(input_dir, output_dir, **kwargs):
         os.makedirs(output_dir)
 
     valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
-    files = [f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions)]
+    files = sorted(f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions))
 
     results = {}
     for filename in files:
