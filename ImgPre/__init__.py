@@ -21,6 +21,7 @@ from .processor import (
     progressive_resize,
     get_sharpness_score,
     get_edge_density,
+    to_rgb,
 )
 
 __version__ = "1.0.0"
@@ -32,4 +33,5 @@ __all__ = [
     "progressive_resize",
     "get_sharpness_score",
     "get_edge_density",
+    "to_rgb",
 ]

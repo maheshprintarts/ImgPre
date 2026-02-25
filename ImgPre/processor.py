@@ -90,17 +90,56 @@ def optimize_image_size(img, step=0.98, is_prescaled=False, min_short_side=500):
     return current_img
 
 
+# Modes that need special handling when converting to RGB
+_MODES_NEEDING_ALPHA_FLATTEN = ('RGBA', 'LA', 'PA')
+_MODES_DIRECT_TO_RGB = ('L', 'P', 'CMYK', 'YCbCr', 'LAB', 'HSV', 'I', 'F')
+
+
+def to_rgb(img):
+    """
+    Converts any PIL image to RGB color space.
+    Handles: CMYK, Grayscale (L), Palette (P), RGBA (flattened on white),
+             YCbCr, LAB, HSV, float (F), integer (I), and others.
+    """
+    mode = img.mode
+
+    if mode == 'RGB':
+        return img
+
+    # Modes with alpha: flatten onto a white background before converting
+    if mode in _MODES_NEEDING_ALPHA_FLATTEN:
+        bg = Image.new('RGB', img.size, (255, 255, 255))
+        if img.mode == 'PA':
+            img = img.convert('RGBA')
+        # Paste using alpha channel as mask
+        alpha = img.split()[-1]
+        bg.paste(img.convert('RGB'), mask=alpha)
+        return bg
+
+    # All other modes: Pillow handles most directly
+    return img.convert('RGB')
+
+
 def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080, screen_threshold=2000, dpi=300):
     """
-    Full pipeline: open, pre-scale if >20MP, optimize sharpness, screen-fit, save.
+    Full pipeline for a SINGLE image:
+    1. Open image (any format/color space)
+    2. Convert to RGB color space
+    3. Pre-scale if >20MP
+    4. Perceptual sharpness optimization
+    5. Screen boundary fitting
+    6. Save at specified DPI
 
     Parameters:
         input_path (str): Path to the source image.
         output_path (str): Path to save the processed image.
-        max_screen_w (int): Maximum output width for screen fitting.
-        max_screen_h (int): Maximum output height for screen fitting.
-        screen_threshold (int): If either dimension exceeds this, apply screen fitting.
-        dpi (int): DPI to embed in the saved file metadata.
+        max_screen_w (int): Maximum output width for screen fitting (default: 1920).
+        max_screen_h (int): Maximum output height for screen fitting (default: 1080).
+        screen_threshold (int): Apply screen fitting if either dim > this (default: 2000).
+        dpi (int): DPI metadata to embed in the saved file (default: 300).
+
+    Returns:
+        tuple: Final (width, height) of the saved image.
     """
     try:
         img_obj = None
@@ -117,7 +156,11 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
                 Image.MAX_IMAGE_PIXELS = original_limit
 
         if img_obj:
-            with img_obj as img:
+            with img_obj as raw:
+                # Step 1: Normalize ALL image types to RGB
+                img = to_rgb(raw)
+
+                # Step 2: Pre-scale if >20MP to avoid memory issues
                 total_pixels = img.width * img.height
                 if total_pixels > 20_000_000:
                     scale_factor = (20_000_000 / total_pixels) ** 0.5
@@ -129,31 +172,26 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
                 else:
                     is_prescaled = False
 
-                if img.mode != 'RGBA':
-                    img = img.convert('RGBA')
+                # Step 3: Perceptual sharpness optimization (works on RGB)
+                optimized = optimize_image_size(img, step=0.98, is_prescaled=is_prescaled)
 
-                rgb_check = img.convert('RGB')
-                optimized_rgb = optimize_image_size(rgb_check, step=0.98, is_prescaled=is_prescaled)
+                if optimized.size != img.size:
+                    img = progressive_resize(img, optimized.size)
+                else:
+                    img = optimized
 
-                final_size = optimized_rgb.size
-                if final_size != img.size:
-                    img = progressive_resize(img, final_size)
-
+                # Step 4: Screen boundary fitting
                 if img.width > screen_threshold or img.height > screen_threshold:
                     scale = min(max_screen_w / img.width, max_screen_h / img.height)
                     fit_w = max(1, int(img.width * scale))
                     fit_h = max(1, int(img.height * scale))
                     img = img.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
 
-                if output_path.lower().endswith(('.jpg', '.jpeg')):
-                    final_img = img.convert('RGB')
-                    final_img.save(output_path, dpi=(dpi, dpi), quality=100,
-                                   subsampling=0, optimize=True, progressive=True)
-                else:
-                    final_img = img
-                    final_img.save(output_path, dpi=(dpi, dpi))
+                # Step 5: Save — always RGB
+                img.save(output_path, dpi=(dpi, dpi), quality=100,
+                         subsampling=0, optimize=True, progressive=True)
 
-                return final_img.size
+                return img.size
 
     except Exception as e:
         raise RuntimeError(f"Failed to process {input_path}: {e}") from e
