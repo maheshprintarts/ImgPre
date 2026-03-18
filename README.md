@@ -1,17 +1,19 @@
 # ImgPre — Perceptual Image Preprocessor
 
-A Python package that intelligently resizes images based on **perceptual sharpness**, not fixed pixel dimensions. Includes a proportional `--scale` mode for direct control over output size.
+A Python package that intelligently resizes images based on **perceptual sharpness**, not fixed pixel dimensions. Features effective resolution detection and scale-modulated optimization for zero-waste output.
 
 ---
 
 ## Features
 
 - **Perceptual optimization** — Adaptive sharpness-based downscaling (Laplacian variance)
+- **Effective resolution detection** — Detects real information content via downscale-upscale roundtrip analysis; never outputs fake/interpolated pixels
+- **Scale-modulated optimization** — `--scale` controls both output size AND optimization intensity (step size, sharpness target, patience, minimum floor)
 - **Proportional scaling** — `--scale 0.5` on a 6000x4000 image outputs 3000x2000
 - **All formats supported** — JPG, PNG, BMP, TIFF, GIF, CMYK, Grayscale, RGBA
 - **Universal RGB conversion** — Any color space normalized automatically
 - **Diminishing returns detection** — Stops when quality improvement plateaus
-- **20MP pre-scaling** — Handles massive files (50MP+) without memory crashes
+- **Adaptive pre-scaling** — Smart memory management with 2x headroom above target, capped at 50MP
 - **Screen boundary fitting** — Auto-fits large images into configurable screen bounds
 - **Single image & batch processing** — One file or an entire folder
 - **Format-aware saving** — JPEG (quality=100, progressive), PNG (optimized), etc.
@@ -29,7 +31,7 @@ A Python package that intelligently resizes images based on **perceptual sharpne
 | TIFF | `.tiff` | Supported |
 | CMYK | `.jpg` (Photoshop/print) | Auto-converted to RGB |
 | Grayscale | `.jpg`, `.png` | Auto-converted to RGB |
-| RGBA | `.png` | Transparency → white background → RGB |
+| RGBA | `.png` | Transparency flattened to white background then RGB |
 
 ---
 
@@ -65,7 +67,7 @@ numpy>=1.21.0
 # Perceptual auto-optimization (default)
 imgpre input.jpg output.jpg
 
-# Scale to 50% of original dimensions
+# Scale to 50% of effective resolution
 imgpre input.jpg output.jpg --scale 0.5
 
 # Batch process a folder
@@ -96,7 +98,7 @@ imgpre [input] [output] [options]
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--scale` | float | `None` | Proportional scale factor (0.0–1.0). Bypasses perceptual optimization. |
+| `--scale` | float | `None` | Scale factor (0.1–1.0). Controls optimization intensity AND output size relative to effective resolution. |
 | `--max-width` | int | `1920` | Maximum output width for screen fitting |
 | `--max-height` | int | `1080` | Maximum output height for screen fitting |
 | `--threshold` | int | `2000` | Screen-fit triggers when either dimension exceeds this value |
@@ -107,13 +109,26 @@ imgpre [input] [output] [options]
 
 #### Scale Behavior
 
-| Input Size | `--scale` | Output Size |
-|---|---|---|
-| 6900 x 10800 | `0.5` | 3450 x 5400 |
-| 5000 x 5000 | `0.25` | 1250 x 1250 |
-| 4000 x 3000 | `0.75` | 3000 x 2250 |
-| 4000 x 3000 | `1.0` | 4000 x 3000 (no resize, just optimized save) |
-| 4000 x 3000 | *(omitted)* | Perceptual auto — size determined by sharpness analysis |
+When `--scale` is provided, ImgPre first detects the image's **effective resolution** (real information content), then scales relative to that — ensuring zero interpolated/fake pixels in the output.
+
+| Input Size | Effective Res | `--scale` | Output Size | Notes |
+|---|---|---|---|---|
+| 6900 x 10800 | 85% | `0.5` | ~2933 x 4590 | 50% of effective, not original |
+| 5000 x 5000 | 100% | `0.25` | 1250 x 1250 | Full info, scaled to 25% |
+| 4000 x 3000 | 90% | `0.75` | 2700 x 2025 | 75% of effective resolution |
+| 4000 x 3000 | 95% | `1.0` | 3800 x 2850 | All real pixels, no waste |
+| 4000 x 3000 | — | *(omitted)* | Auto | Perceptual auto — size determined by sharpness analysis |
+
+#### Scale-Modulated Optimization Parameters
+
+The `--scale` value also modulates the perceptual optimizer's intensity:
+
+| Parameter | Scale 0.1 | Scale 0.5 | Scale 1.0 |
+|---|---|---|---|
+| Step size | 0.997 (gentle) | 0.988 | 0.980 (aggressive) |
+| Sharpness target | 1.05x baseline | 1.25x | 1.50x baseline |
+| Patience (plateau steps) | 2 | 5 | 8 |
+| Min short side | 50 px | 250 px | 500 px |
 
 ### Examples
 
@@ -121,11 +136,14 @@ imgpre [input] [output] [options]
 # Default perceptual optimization
 imgpre photo.jpg optimized.jpg
 
-# Half-size output
+# Half-size output (relative to effective resolution)
 imgpre photo.jpg half.jpg --scale 0.5
 
 # Quarter-size with custom DPI
 imgpre photo.jpg quarter.jpg --scale 0.25 --dpi 150
+
+# Full effective resolution, maximum optimization
+imgpre photo.jpg full.jpg --scale 1.0
 
 # Custom screen bounds
 imgpre photo.jpg fitted.jpg --max-width 2560 --max-height 1440 --threshold 3000
@@ -219,7 +237,7 @@ from ImgPre import process_image
 # Perceptual auto-optimization
 process_image("photo.jpg", "output.jpg")
 
-# Proportional scaling
+# Proportional scaling (relative to effective resolution)
 process_image("photo.jpg", "output.jpg", scale=0.5)
 
 # Full options
@@ -251,7 +269,15 @@ for filename, result in results.items():
 ### Utility Functions
 
 ```python
-from ImgPre import to_rgb, get_sharpness_score, get_edge_density, optimize_image_size
+from ImgPre import (
+    to_rgb,
+    get_sharpness_score,
+    get_edge_density,
+    optimize_image_size,
+    progressive_resize,
+    find_effective_resolution,
+    scale_to_params,
+)
 from PIL import Image
 
 img = Image.open("photo.jpg")
@@ -267,9 +293,21 @@ print(f"Sharpness: {score:.2f}")
 density = get_edge_density(rgb)
 print(f"Edge density: {density:.4f}")
 
-# Run perceptual optimization only
+# Detect effective resolution (real information ratio)
+eff = find_effective_resolution(rgb)
+print(f"Effective resolution: {eff:.1%}")
+
+# Map scale to optimization parameters
+params = scale_to_params(0.5)
+print(f"Optimizer params: {params}")
+
+# Run perceptual optimization
 optimized = optimize_image_size(rgb, step=0.98, min_short_side=500)
 print(f"Optimized size: {optimized.size}")
+
+# Progressive multi-step resize (higher quality than single-step)
+resized = progressive_resize(rgb, (1920, 1080))
+print(f"Resized: {resized.size}")
 ```
 
 ---
@@ -284,26 +322,52 @@ Input Image (any format/color space)
        |  CMYK, Grayscale, RGBA, Palette → RGB
        |  Alpha channels flattened onto white background
        v
-  [2] Pre-scale if > 20MP
-       |  Reduces memory footprint before processing
-       v
-  [3] Choose path:
+  [2] Choose path:
        |
        |-- --scale provided?
-       |      YES → Proportional resize (progressive multi-step LANCZOS)
-       |      NO  → Perceptual optimization:
-       |              - Measure baseline sharpness (Laplacian variance)
-       |              - Set target = baseline × 1.5
-       |              - Downscale 2% per step until target met
-       |              - Stop early if < 0.5% improvement for 8 steps
-       |              - Never shrink below 500px on shorter side
-       v
-  [4] Screen boundary fitting (if no --scale)
-       |  If either dimension > threshold (default 2000px),
-       |  fit proportionally within max_width × max_height
+       |      |
+       |      v
+       |   [2a] Detect effective resolution
+       |         Downscale-upscale roundtrip on ~2000px analysis copy
+       |         Binary search finds real information boundary (0.1% precision)
+       |         Target = effective_resolution × scale
+       |      |
+       |      v
+       |   [2b] Adaptive pre-scale for memory
+       |         2× headroom above target, capped at 50MP
+       |      |
+       |      v
+       |   [3a] Scale-modulated perceptual optimization
+       |         step, target_multiplier, patience, min_short_side
+       |         all derived from scale value via scale_to_params()
+       |      |
+       |      v
+       |   [3b] Resize to target dimensions
+       |         Progressive multi-step LANCZOS downscale
+       |         Output = effective_resolution × scale (zero fake pixels)
+       |
+       |-- No --scale?
+       |      |
+       |      v
+       |   [2] Pre-scale if > 20MP
+       |       Reduces memory footprint before processing
+       |      |
+       |      v
+       |   [3] Full perceptual optimization
+       |       Measure baseline sharpness (Laplacian variance)
+       |       Set target = baseline × 1.5
+       |       Downscale 2% per step until target met
+       |       Stop early if < 0.5% improvement for 8 steps
+       |       Never shrink below 500px on shorter side
+       |      |
+       |      v
+       |   [4] Screen boundary fitting
+       |       If either dimension > threshold (default 2000px),
+       |       fit proportionally within max_width × max_height
+       |
        v
   [5] Save with format-aware settings
-       |  JPEG: quality=100, progressive, optimized
+       |  JPEG: quality=100, progressive, optimized, subsampling=0
        |  PNG:  optimized compression
        |  DPI metadata embedded (default 300)
        v
