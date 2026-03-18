@@ -33,7 +33,8 @@ def main():
     parser.add_argument("--threshold", type=int, default=2000, help="Screen-fit threshold in px (default: 2000)")
     parser.add_argument("--dpi", type=int, default=300, help="Output DPI (default: 300)")
     parser.add_argument("--scale", type=float, default=None,
-                        help="Preprocessing scale factor 0.0-1.0 (e.g., 0.5 = half size). Bypasses perceptual optimization.")
+                        help="Preprocessing scale 0.1-1.0: controls optimization intensity AND output size. "
+                             "1.0 = full optimization + original size, 0.5 = moderate + half size, 0.1 = minimal + 10%% size.")
 
     args = parser.parse_args()
 

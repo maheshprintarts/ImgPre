@@ -47,20 +47,21 @@ def progressive_resize(img, target_size, step=0.9):
     return current_img
 
 
-def optimize_image_size(img, step=0.98, is_prescaled=False, min_short_side=500):
+def optimize_image_size(img, step=0.98, is_prescaled=False, min_short_side=500,
+                        target_multiplier=1.5, max_no_improvement_steps=8):
     """
     Dynamically scales image down until perceptual quality peak is reached.
 
     Uses:
-    - Adaptive relative target (1.5x own baseline sharpness)
-    - Diminishing returns detection (stops if improvement < 0.5% for 8 steps)
+    - Adaptive relative target (target_multiplier × own baseline sharpness)
+    - Diminishing returns detection (stops if improvement < 0.5% for N steps)
     - Minimum size guard (never crush below min_short_side pixels)
     """
     current_img = img
     score = get_sharpness_score(current_img)
 
     min_absolute_target = 400.0
-    relative_target = score * 1.5
+    relative_target = score * target_multiplier
     target_score = max(relative_target, min_absolute_target)
 
     if is_prescaled and score > min_absolute_target:
@@ -68,7 +69,6 @@ def optimize_image_size(img, step=0.98, is_prescaled=False, min_short_side=500):
 
     prev_score = score
     no_improvement_count = 0
-    max_no_improvement_steps = 8
 
     while score < target_score:
         short_side = min(current_img.width, current_img.height)
@@ -122,15 +122,93 @@ def to_rgb(img):
     return img.convert('RGB')
 
 
+def find_effective_resolution(img, threshold=0.998, analysis_max=2000):
+    """
+    Detects the image's true information content using downscale-upscale roundtrip.
+
+    Principle: downscale to X%, upscale back, compare with original.
+    If quality stays above threshold, those pixels were interpolated/redundant.
+    Binary search finds the smallest X where real information is preserved.
+
+    Works on a ~2000px analysis copy for speed (< 0.5s on any image).
+
+    Returns:
+        float: Effective resolution ratio (0.0-1.0) relative to input dimensions.
+               e.g. 0.85 means image only has real information at 85% of its pixel size.
+    """
+    aw, ah = img.size
+
+    # Downscale to analysis size for fast computation
+    if max(aw, ah) > analysis_max:
+        ratio = analysis_max / max(aw, ah)
+        aw_a, ah_a = max(1, int(aw * ratio)), max(1, int(ah * ratio))
+        analysis_img = img.resize((aw_a, ah_a), Image.Resampling.LANCZOS)
+    else:
+        aw_a, ah_a = aw, ah
+        analysis_img = img
+
+    original_arr = np.array(analysis_img, dtype=np.float32)
+
+    low, high = 0.1, 1.0
+    for _ in range(10):  # 10 iterations of binary search -> ~0.1% precision
+        mid = (low + high) / 2.0
+        test_w = max(1, int(aw_a * mid))
+        test_h = max(1, int(ah_a * mid))
+
+        # Roundtrip: downscale then upscale back
+        small = analysis_img.resize((test_w, test_h), Image.Resampling.LANCZOS)
+        restored = small.resize((aw_a, ah_a), Image.Resampling.LANCZOS)
+
+        # MSE-based quality metric (1.0 = identical)
+        restored_arr = np.array(restored, dtype=np.float32)
+        mse = np.mean((original_arr - restored_arr) ** 2)
+        quality = 1.0 - mse / 65025.0  # 65025 = 255^2
+
+        if quality >= threshold:
+            high = mid  # can go smaller, still retaining quality
+        else:
+            low = mid   # lost too much, need more pixels
+
+    return high
+
+
+def scale_to_params(scale):
+    """
+    Maps scale factor (0.1–1.0) to perceptual optimization parameters.
+
+    scale=1.0 → most aggressive optimization (sharpest output)
+    scale=0.1 → least optimization (preserves original characteristics)
+
+    Returns dict with: step, target_multiplier, patience, min_short_side
+    """
+    t = max(0.0, min(1.0, (scale - 0.1) / 0.9))  # normalize to [0, 1]
+
+    return {
+        'step': 0.997 - t * 0.017,               # 0.997 (gentle) → 0.98 (aggressive)
+        'target_multiplier': 1.05 + t * 0.45,     # 1.05× → 1.5× sharpness target
+        'patience': int(2 + t * 6),                # 2 → 8 diminishing-returns steps
+        'min_short_side': int(50 + t * 450),       # 50px → 500px floor
+    }
+
+
 def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080, screen_threshold=2000, dpi=300, scale=None):
     """
     Full pipeline for a SINGLE image:
     1. Open image (any format/color space)
     2. Convert to RGB color space
     3. Pre-scale if >20MP
-    4. Perceptual sharpness optimization
-    5. Screen boundary fitting
+    4. Perceptual sharpness optimization (intensity modulated by scale)
+    5. Proportional resize to target (if scale provided) OR screen fitting
     6. Save at specified DPI
+
+    When scale is provided (0.1–1.0):
+        - scale=1.0: full optimization, output = original dimensions
+        - scale=0.5: moderate optimization, output = 50% of original
+        - scale=0.1: minimal optimization, output = 10% of original
+        - Screen fitting is bypassed (user controls size via scale)
+
+    When scale is None:
+        - Full perceptual optimization + screen boundary fitting (original behavior)
 
     Parameters:
         input_path (str): Path to the source image.
@@ -139,6 +217,8 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
         max_screen_h (int): Maximum output height for screen fitting (default: 1080).
         screen_threshold (int): Apply screen fitting if either dim > this (default: 2000).
         dpi (int): DPI metadata to embed in the saved file (default: 300).
+        scale (float): Preprocessing scale 0.1–1.0. Controls both optimization
+                       intensity and proportional output size.
 
     Returns:
         tuple: Final (width, height) of the saved image.
@@ -163,24 +243,85 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
                 img = to_rgb(raw)
                 original_w, original_h = img.width, img.height
 
-                # Step 2: Pre-scale if >20MP to avoid memory issues
                 total_pixels = img.width * img.height
-                if total_pixels > 20_000_000:
-                    scale_factor = (20_000_000 / total_pixels) ** 0.5
-                    safe_scale_factor = scale_factor * 0.95
-                    new_w = max(1, int(img.width * safe_scale_factor))
-                    new_h = max(1, int(img.height * safe_scale_factor))
-                    img = progressive_resize(img, (new_w, new_h))
-                    is_prescaled = True
-                else:
-                    is_prescaled = False
 
                 if scale is not None:
-                    # Direct proportional scaling using original input dimensions
-                    target_w = max(1, int(original_w * scale))
-                    target_h = max(1, int(original_h * scale))
-                    img = progressive_resize(img, (target_w, target_h))
+                    # Step 2a: Detect effective resolution (real information ceiling)
+                    # Uses fast roundtrip analysis on ~2000px working copy
+                    eff_ratio = find_effective_resolution(img)
+                    eff_w = max(1, int(original_w * eff_ratio))
+                    eff_h = max(1, int(original_h * eff_ratio))
+                    logger.info(
+                        "Effective resolution: %.1f%% -> %dx%d (of %dx%d original)",
+                        eff_ratio * 100, eff_w, eff_h, original_w, original_h,
+                    )
+
+                    # Target = effective_resolution * scale (never exceeds real info)
+                    # scale=1.0 -> full effective size (all real pixels, zero fake)
+                    # scale=0.5 -> half of effective (always downscaling)
+                    target_w = max(1, int(eff_w * scale))
+                    target_h = max(1, int(eff_h * scale))
+
+                    # Step 2b: Adaptive pre-scale for memory — 2x headroom above
+                    # target for optimizer, capped at 50MP
+                    target_pixels = target_w * target_h
+                    headroom_pixels = min(int(target_pixels * 2), 50_000_000)
+                    working_limit = max(headroom_pixels, 20_000_000)
+
+                    if total_pixels > working_limit:
+                        sf = (working_limit / total_pixels) ** 0.5
+                        new_w = max(target_w, int(img.width * sf))
+                        new_h = max(target_h, int(img.height * sf))
+                        img = progressive_resize(img, (new_w, new_h))
+                        is_prescaled = True
+                    else:
+                        is_prescaled = False
+
+                    # Step 3a: Perceptual optimization with scale-modulated intensity
+                    params = scale_to_params(scale)
+                    logger.info(
+                        "Scale %.2f -> step=%.4f, target_mult=%.2f, patience=%d, min_short=%d",
+                        scale, params['step'], params['target_multiplier'],
+                        params['patience'], params['min_short_side'],
+                    )
+
+                    optimized = optimize_image_size(
+                        img,
+                        step=params['step'],
+                        is_prescaled=is_prescaled,
+                        min_short_side=params['min_short_side'],
+                        target_multiplier=params['target_multiplier'],
+                        max_no_improvement_steps=params['patience'],
+                    )
+
+                    if optimized.size != img.size:
+                        img = progressive_resize(img, optimized.size)
+                    else:
+                        img = optimized
+
+                    # Step 3b: Resize to target (always downscaling — zero fake pixels)
+                    if img.size != (target_w, target_h):
+                        img = progressive_resize(img, (target_w, target_h))
+
+                    logger.info(
+                        "Output: %dx%d (%.1f%% of effective %dx%d, %.1f%% of original %dx%d)",
+                        img.width, img.height,
+                        100.0 * scale, eff_w, eff_h,
+                        100.0 * img.width * img.height / (original_w * original_h),
+                        original_w, original_h,
+                    )
                 else:
+                    # Step 2: Pre-scale if >20MP to avoid memory issues
+                    if total_pixels > 20_000_000:
+                        scale_factor = (20_000_000 / total_pixels) ** 0.5
+                        safe_scale_factor = scale_factor * 0.95
+                        new_w = max(1, int(img.width * safe_scale_factor))
+                        new_h = max(1, int(img.height * safe_scale_factor))
+                        img = progressive_resize(img, (new_w, new_h))
+                        is_prescaled = True
+                    else:
+                        is_prescaled = False
+
                     # Step 3: Perceptual sharpness optimization (works on RGB)
                     optimized = optimize_image_size(img, step=0.98, is_prescaled=is_prescaled)
 

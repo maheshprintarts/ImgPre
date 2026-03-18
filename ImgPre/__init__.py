@@ -22,9 +22,11 @@ from .processor import (
     get_sharpness_score,
     get_edge_density,
     to_rgb,
+    scale_to_params,
+    find_effective_resolution,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "maheshprintarts"
 __all__ = [
     "process_image",
@@ -34,4 +36,6 @@ __all__ = [
     "get_sharpness_score",
     "get_edge_density",
     "to_rgb",
+    "scale_to_params",
+    "find_effective_resolution",
 ]
