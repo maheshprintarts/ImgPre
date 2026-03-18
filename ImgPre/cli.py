@@ -32,14 +32,20 @@ def main():
     parser.add_argument("--max-height", type=int, default=1080, help="Max output height (default: 1080)")
     parser.add_argument("--threshold", type=int, default=2000, help="Screen-fit threshold in px (default: 2000)")
     parser.add_argument("--dpi", type=int, default=300, help="Output DPI (default: 300)")
+    parser.add_argument("--scale", type=float, default=None,
+                        help="Preprocessing scale factor 0.0-1.0 (e.g., 0.5 = half size). Bypasses perceptual optimization.")
 
     args = parser.parse_args()
+
+    if args.scale is not None and not (0.0 < args.scale <= 1.0):
+        parser.error("--scale must be between 0.0 (exclusive) and 1.0 (inclusive)")
 
     kwargs = dict(
         max_screen_w=args.max_width,
         max_screen_h=args.max_height,
         screen_threshold=args.threshold,
         dpi=args.dpi,
+        scale=args.scale,
     )
 
     # --- Batch mode ---

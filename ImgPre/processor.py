@@ -122,7 +122,7 @@ def to_rgb(img):
     return img.convert('RGB')
 
 
-def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080, screen_threshold=2000, dpi=300):
+def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080, screen_threshold=2000, dpi=300, scale=None):
     """
     Full pipeline for a SINGLE image:
     1. Open image (any format/color space)
@@ -161,6 +161,7 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
             with img_obj as raw:
                 # Step 1: Normalize ALL image types to RGB
                 img = to_rgb(raw)
+                original_w, original_h = img.width, img.height
 
                 # Step 2: Pre-scale if >20MP to avoid memory issues
                 total_pixels = img.width * img.height
@@ -174,20 +175,26 @@ def process_image(input_path, output_path, max_screen_w=1920, max_screen_h=1080,
                 else:
                     is_prescaled = False
 
-                # Step 3: Perceptual sharpness optimization (works on RGB)
-                optimized = optimize_image_size(img, step=0.98, is_prescaled=is_prescaled)
-
-                if optimized.size != img.size:
-                    img = progressive_resize(img, optimized.size)
+                if scale is not None:
+                    # Direct proportional scaling using original input dimensions
+                    target_w = max(1, int(original_w * scale))
+                    target_h = max(1, int(original_h * scale))
+                    img = progressive_resize(img, (target_w, target_h))
                 else:
-                    img = optimized
+                    # Step 3: Perceptual sharpness optimization (works on RGB)
+                    optimized = optimize_image_size(img, step=0.98, is_prescaled=is_prescaled)
 
-                # Step 4: Screen boundary fitting
-                if img.width > screen_threshold or img.height > screen_threshold:
-                    scale = min(max_screen_w / img.width, max_screen_h / img.height)
-                    fit_w = max(1, int(img.width * scale))
-                    fit_h = max(1, int(img.height * scale))
-                    img = img.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
+                    if optimized.size != img.size:
+                        img = progressive_resize(img, optimized.size)
+                    else:
+                        img = optimized
+
+                    # Step 4: Screen boundary fitting
+                    if img.width > screen_threshold or img.height > screen_threshold:
+                        scale_fit = min(max_screen_w / img.width, max_screen_h / img.height)
+                        fit_w = max(1, int(img.width * scale_fit))
+                        fit_h = max(1, int(img.height * scale_fit))
+                        img = img.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
 
                 # Step 5: Save — format-aware, always RGB
                 ext = os.path.splitext(output_path)[1].lower()
